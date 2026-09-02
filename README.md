@@ -97,10 +97,14 @@ environment variable, or the `rubyLspCommand` initialization option.
    compiles it with your Rust toolchain, which must be `rustup`-managed so the
    `wasm32-wasip2` target can be added (Homebrew's `rust` formula is not;
    use `brew install rustup` instead).
-3. Make sure `haml-lsp` is on the `PATH` of the Ruby that Zed sees (see
-   above; with a version manager such as mise/rbenv/asdf, install it into the
-   Ruby that is active in your login shell). The extension looks for it in
-   your Gemfile.lock (`bundle exec haml-lsp`), then on your `PATH`.
+3. The extension looks for `haml-lsp` in your Gemfile.lock (`bundle exec
+   haml-lsp`), then on the `PATH` of your login shell. If neither has it, it
+   installs the gem automatically into an extension-managed gem directory
+   using the `ruby`/`gem` from that `PATH` — and `ruby-lsp` too, unless your
+   project or `PATH` already provides one. Set
+   `lsp.haml-lsp.settings.auto_install = false` to opt out and manage the
+   gems yourself (with a version manager such as mise/rbenv/asdf, install
+   them into the Ruby that is active in your login shell).
 4. Check that nothing in your settings excludes it. If you have a `"Haml"`
    entry under `languages` with a `language_servers` list, that list is
    exclusive and must include `"haml-lsp"`:
@@ -126,7 +130,7 @@ Settings (`settings.json`):
     "haml-lsp": {
       // Run a specific executable, e.g. a git checkout while developing haml-lsp itself:
       // "binary": { "path": "/path/to/haml-lsp/exe/haml-lsp" },
-      // "settings": { "use_bundler": false },
+      // "settings": { "use_bundler": false, "auto_install": false },
       "initialization_options": {
         // passed to haml-lsp; everything except rubyLspCommand is handed to ruby-lsp
         // "rubyLspCommand": ["bundle", "exec", "ruby-lsp"],
@@ -140,7 +144,7 @@ Settings (`settings.json`):
 Until the gem is published, install it from a checkout:
 
 ```sh
-gem build haml-lsp.gemspec && gem install --local haml-lsp-0.1.0.gem
+gem build haml-lsp.gemspec && gem install --local haml-lsp-*.gem
 ```
 
 This installs a snapshot — reinstall after changing `lib/`, or point

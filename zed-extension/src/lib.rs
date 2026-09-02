@@ -6,23 +6,114 @@
 //! 2. `bundle exec haml-lsp` when the worktree's `Gemfile.lock` includes the gem
 //!    (disable with `lsp.haml-lsp.settings.use_bundler = false`).
 //! 3. `haml-lsp` from the worktree's shell `PATH` (`gem install haml-lsp`).
+//! 4. Otherwise the gem is installed automatically into an extension-managed
+//!    gem directory (see `gemset.rs`), together with `ruby-lsp` when that is
+//!    not available through Bundler or `PATH` either. Disable with
+//!    `lsp.haml-lsp.settings.auto_install = false`.
 
+mod gemset;
+
+use gemset::Gemset;
 use zed_extension_api::{
     self as zed, lsp::CompletionKind, lsp::SymbolKind, settings::LspSettings, CodeLabel,
-    CodeLabelSpan, Command, LanguageServerId, Result, Worktree,
+    CodeLabelSpan, Command, LanguageServerId, LanguageServerInstallationStatus, Result, Worktree,
 };
 
 const EXECUTABLE: &str = "haml-lsp";
 const GEM_NAME: &str = "haml-lsp";
+const RUBY_LSP: &str = "ruby-lsp";
 
 struct HamlLspExtension;
 
 impl HamlLspExtension {
-    fn gemfile_lock_has_gem(worktree: &Worktree) -> bool {
+    fn gemfile_lock_has_gem(worktree: &Worktree, gem: &str) -> bool {
         worktree
             .read_text_file("Gemfile.lock")
-            .map(|lock| lockfile_lists_gem(&lock, GEM_NAME))
+            .map(|lock| lockfile_lists_gem(&lock, gem))
             .unwrap_or(false)
+    }
+
+    fn gemset(env: &[(String, String)]) -> Result<Gemset> {
+        let base_dir = std::env::current_dir()
+            .map_err(|e| format!("failed to locate the extension directory: {e}"))?;
+        Gemset::for_ruby(&base_dir, env)
+    }
+
+    /// haml-lsp finds `ruby-lsp` itself through the project's Gemfile.lock or
+    /// `PATH`. When neither has it (typical for people relying on the Ruby
+    /// extension's own private install), provide one from our gem directory
+    /// and point haml-lsp at it. Returns the extra arguments and environment.
+    fn ruby_lsp_fallback(
+        language_server_id: &LanguageServerId,
+        worktree: &Worktree,
+        env: Vec<(String, String)>,
+        auto_install: bool,
+    ) -> Result<(Vec<String>, Vec<(String, String)>)> {
+        let has_ruby_lsp =
+            worktree.which(RUBY_LSP).is_some() || Self::gemfile_lock_has_gem(worktree, RUBY_LSP);
+        if has_ruby_lsp || !auto_install {
+            return Ok((Vec::new(), env));
+        }
+
+        let gemset = Self::gemset(&env)?;
+        Self::ensure_installed(&gemset, language_server_id, RUBY_LSP)?;
+        Ok((
+            vec!["--ruby-lsp-command".to_string(), gemset.bin_path(RUBY_LSP)],
+            gemset.env(),
+        ))
+    }
+
+    /// Installs (or updates) `haml-lsp` in the extension's gem directory and
+    /// returns the command to run it from there.
+    fn gemset_command(
+        language_server_id: &LanguageServerId,
+        worktree: &Worktree,
+        env: &[(String, String)],
+    ) -> Result<Command> {
+        let gemset = Self::gemset(env)?;
+        Self::ensure_installed(&gemset, language_server_id, GEM_NAME)?;
+        let (args, env) = Self::ruby_lsp_fallback(language_server_id, worktree, gemset.env(), true)?;
+
+        Ok(Command {
+            command: gemset.bin_path(EXECUTABLE),
+            args,
+            env,
+        })
+    }
+
+    fn ensure_installed(gemset: &Gemset, id: &LanguageServerId, gem: &str) -> Result<()> {
+        zed::set_language_server_installation_status(
+            id,
+            &LanguageServerInstallationStatus::CheckingForUpdate,
+        );
+
+        match gemset.installed_version(gem)? {
+            None => {
+                zed::set_language_server_installation_status(
+                    id,
+                    &LanguageServerInstallationStatus::Downloading,
+                );
+                gemset.install(gem)
+            }
+            // Updating is best effort: being offline must not prevent start-up.
+            Some(_) => match gemset.is_outdated(gem) {
+                Ok(true) => {
+                    zed::set_language_server_installation_status(
+                        id,
+                        &LanguageServerInstallationStatus::Downloading,
+                    );
+                    if let Err(e) = gemset.update(gem) {
+                        eprintln!("haml-lsp: could not update {gem}: {e}");
+                    }
+                    Ok(())
+                }
+                Ok(false) => Ok(()),
+                Err(e) => {
+                    eprintln!("haml-lsp: could not check whether {gem} is outdated: {e}");
+                    Ok(())
+                }
+            },
+        }
     }
 }
 
@@ -98,32 +189,52 @@ impl zed::Extension for HamlLspExtension {
             });
         }
 
-        let use_bundler = settings
-            .settings
-            .as_ref()
-            .and_then(|s| s.get("use_bundler"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let setting = |name: &str, default: bool| {
+            settings
+                .settings
+                .as_ref()
+                .and_then(|s| s.get(name))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default)
+        };
+        let use_bundler = setting("use_bundler", true);
+        let auto_install = setting("auto_install", true);
 
-        if use_bundler && Self::gemfile_lock_has_gem(worktree) {
-            if let Some(bundle) = worktree.which("bundle") {
-                return Ok(Command {
-                    command: bundle,
-                    args: vec!["exec".into(), EXECUTABLE.into()],
-                    env,
-                });
-            }
-        }
-
-        if let Some(path) = worktree.which(EXECUTABLE) {
-            return Ok(Command {
-                command: path,
-                args: Vec::new(),
+        let command = if use_bundler && Self::gemfile_lock_has_gem(worktree, GEM_NAME) {
+            let bundle = worktree
+                .which("bundle")
+                .ok_or_else(|| "haml-lsp is in your Gemfile.lock but `bundle` was not found on PATH".to_string())?;
+            let (extra_args, env) =
+                Self::ruby_lsp_fallback(language_server_id, worktree, env, auto_install)?;
+            Command {
+                command: bundle,
+                args: ["exec".to_string(), EXECUTABLE.to_string()]
+                    .into_iter()
+                    .chain(extra_args)
+                    .collect(),
                 env,
-            });
-        }
+            }
+        } else if let Some(path) = worktree.which(EXECUTABLE) {
+            let (args, env) =
+                Self::ruby_lsp_fallback(language_server_id, worktree, env, auto_install)?;
+            Command {
+                command: path,
+                args,
+                env,
+            }
+        } else if auto_install {
+            Self::gemset_command(language_server_id, worktree, &env)
+                .map_err(|e| format!("{e}\n\n{}", not_found_message(worktree, &env)))?
+        } else {
+            return Err(not_found_message(worktree, &env));
+        };
 
-        Err(not_found_message(worktree, &env))
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &LanguageServerInstallationStatus::None,
+        );
+
+        Ok(command)
     }
 
     fn language_server_initialization_options(
