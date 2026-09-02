@@ -219,6 +219,30 @@ class ServerTest < Minitest::Test
     assert_equal 1, published[:params][:diagnostics].size
   end
 
+  def test_pushed_diagnostics_are_debounced
+    initialize!(capabilities: { textDocument: {} })
+    open!("%div\n")
+    change!(2, [{ range: range(0, 4, 0, 4), text: "\n  %p" }])
+    change!(3, [{ range: range(1, 4, 1, 4), text: "\n %span" }])
+
+    sleep(HamlLsp::Server::PUSH_DIAGNOSTICS_DELAY * 3)
+    messages = messages_until_response_to(request_id("fake/documents", {}))
+    published = messages.select { |m| m[:method] == "textDocument/publishDiagnostics" }
+
+    assert_equal 1, published.size, "expected a single publish after the burst"
+    assert_equal 3, published.first[:params][:version]
+    assert_equal 1, published.first[:params][:diagnostics].size
+  end
+
+  def test_document_symbols_come_from_the_haml_outline
+    initialize!
+    open!("%html\n  %body.app\n    = content\n")
+
+    symbols = request!("textDocument/documentSymbol", textDocument: { uri: URI })[:result]
+    assert_equal ["%html"], symbols.map { |s| s[:name] }
+    assert_equal ["%body.app"], symbols.first[:children].map { |s| s[:name] }
+  end
+
   def test_closing_a_document_forgets_it
     initialize!
     open!("%p\n")
@@ -277,9 +301,24 @@ class ServerTest < Minitest::Test
   end
 
   def request!(method, params)
+    id = request_id(method, params)
+    read_until { |message| message[:id] == id && !message.key?(:method) }
+  end
+
+  def request_id(method, params)
     id = (@next_id += 1)
     @client.write(jsonrpc: "2.0", id: id, method: method, params: params)
-    read_until { |message| message[:id] == id && !message.key?(:method) }
+    id
+  end
+
+  # Everything received up to and including the response to `id`.
+  def messages_until_response_to(id)
+    messages = []
+    read_until do |message|
+      messages << message
+      message[:id] == id && !message.key?(:method)
+    end
+    messages
   end
 
   def read_until

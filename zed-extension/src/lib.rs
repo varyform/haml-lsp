@@ -72,7 +72,8 @@ impl HamlLspExtension {
     ) -> Result<Command> {
         let gemset = Self::gemset(env)?;
         Self::ensure_installed(&gemset, language_server_id, GEM_NAME)?;
-        let (args, env) = Self::ruby_lsp_fallback(language_server_id, worktree, gemset.env(), true)?;
+        let (args, env) =
+            Self::ruby_lsp_fallback(language_server_id, worktree, gemset.env(), true)?;
 
         Ok(Command {
             command: gemset.bin_path(EXECUTABLE),
@@ -95,7 +96,9 @@ impl HamlLspExtension {
                 );
                 gemset.install(gem)
             }
-            // Updating is best effort: being offline must not prevent start-up.
+            // Updating is best effort and rate limited: being offline must not
+            // prevent start-up, and `gem outdated` is a network round trip.
+            Some(_) if !gemset.should_check_for_updates(gem) => Ok(()),
             Some(_) => match gemset.is_outdated(gem) {
                 Ok(true) => {
                     zed::set_language_server_installation_status(
@@ -201,9 +204,9 @@ impl zed::Extension for HamlLspExtension {
         let auto_install = setting("auto_install", true);
 
         let command = if use_bundler && Self::gemfile_lock_has_gem(worktree, GEM_NAME) {
-            let bundle = worktree
-                .which("bundle")
-                .ok_or_else(|| "haml-lsp is in your Gemfile.lock but `bundle` was not found on PATH".to_string())?;
+            let bundle = worktree.which("bundle").ok_or_else(|| {
+                "haml-lsp is in your Gemfile.lock but `bundle` was not found on PATH".to_string()
+            })?;
             let (extra_args, env) =
                 Self::ruby_lsp_fallback(language_server_id, worktree, env, auto_install)?;
             Command {

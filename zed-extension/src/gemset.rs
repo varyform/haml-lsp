@@ -5,7 +5,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use zed_extension_api::{self as zed, Result};
+
+/// How often `gem outdated` (a network round trip) is allowed to run.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const UPDATE_CHECK_MARKER: &str = ".haml-lsp-update-check";
 
 pub struct Gemset {
     gem_home: PathBuf,
@@ -30,14 +35,47 @@ impl Gemset {
         }
 
         let version = ruby_version_label(&String::from_utf8_lossy(&output.stdout));
+        let gems_dir = base_dir.join("gems");
+        let gem_home = gems_dir.join(&version);
+        remove_other_gem_homes(&gems_dir, &gem_home);
+
         Ok(Self {
-            gem_home: base_dir.join("gems").join(version),
+            gem_home,
             shell_env: shell_env.to_vec(),
         })
     }
 
+    /// Whether enough time has passed since the last `gem outdated` check for
+    /// `gem`. Records the check when it returns true.
+    pub fn should_check_for_updates(&self, gem: &str) -> bool {
+        let marker = self.gem_home.join(format!("{UPDATE_CHECK_MARKER}-{gem}"));
+        let recently_checked = std::fs::metadata(&marker)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age < UPDATE_CHECK_INTERVAL);
+
+        if recently_checked {
+            return false;
+        }
+
+        let _ = std::fs::create_dir_all(&self.gem_home);
+        let _ = std::fs::write(
+            &marker,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_default(),
+        );
+        true
+    }
+
     pub fn bin_path(&self, executable: &str) -> String {
-        self.gem_home.join("bin").join(executable).display().to_string()
+        self.gem_home
+            .join("bin")
+            .join(executable)
+            .display()
+            .to_string()
     }
 
     /// The shell environment with this gem home made visible to Ruby (for the
@@ -75,7 +113,11 @@ impl Gemset {
 
     fn gem(&self, args: &[&str]) -> Result<String> {
         let mut command = zed::Command::new("gem");
-        command = command.args(std::iter::once(args[0]).chain(std::iter::once("--norc")).chain(args[1..].iter().copied()));
+        command = command.args(
+            std::iter::once(args[0])
+                .chain(std::iter::once("--norc"))
+                .chain(args[1..].iter().copied()),
+        );
         command = command.envs(self.shell_env.iter().cloned());
         command = command.env("GEM_HOME", self.gem_home.display().to_string());
 
@@ -90,6 +132,25 @@ impl Gemset {
                 args.join(" "),
                 String::from_utf8_lossy(&output.stderr).trim()
             )),
+        }
+    }
+}
+
+/// Gem homes are keyed by Ruby version; after switching Rubies the old one is
+/// dead weight (tens of MB with ruby-lsp), so drop everything but the current.
+fn remove_other_gem_homes(gems_dir: &Path, current: &Path) {
+    let Ok(entries) = std::fs::read_dir(gems_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path != current && path.is_dir() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                eprintln!(
+                    "haml-lsp: could not remove stale gem directory {}: {e}",
+                    path.display()
+                );
+            }
         }
     }
 }
@@ -111,7 +172,12 @@ fn parse_gem_list(output: &str, gem: &str) -> Option<String> {
         if name != gem {
             return None;
         }
-        Some(rest.trim().trim_start_matches('(').trim_end_matches(')').to_string())
+        Some(
+            rest.trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .to_string(),
+        )
     })
 }
 
@@ -153,8 +219,14 @@ mod tests {
     #[test]
     fn parses_gem_list_output() {
         let output = "\n*** LOCAL GEMS ***\n\nhaml-lsp (0.1.0)\nhaml-lsp-other (9.9.9)\n";
-        assert_eq!(parse_gem_list(output, "haml-lsp"), Some("0.1.0".to_string()));
-        assert_eq!(parse_gem_list("prism (default: 1.8.1)", "prism"), Some("default: 1.8.1".to_string()));
+        assert_eq!(
+            parse_gem_list(output, "haml-lsp"),
+            Some("0.1.0".to_string())
+        );
+        assert_eq!(
+            parse_gem_list("prism (default: 1.8.1)", "prism"),
+            Some("default: 1.8.1".to_string())
+        );
         assert_eq!(parse_gem_list("other (1.0)", "haml-lsp"), None);
     }
 
@@ -171,6 +243,51 @@ mod tests {
 
         assert_eq!(env["GEM_PATH"], "/ext/gems/ruby-4.0.6:/other");
         assert_eq!(env["PATH"], "/usr/bin:/ext/gems/ruby-4.0.6/bin");
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("haml-lsp-gemset-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn removes_gem_homes_of_other_ruby_versions() {
+        let gems = temp_dir("cleanup");
+        let current = gems.join("ruby-4.0.6");
+        let stale = gems.join("ruby-3.3.0");
+        std::fs::create_dir_all(current.join("bin")).unwrap();
+        std::fs::create_dir_all(stale.join("bin")).unwrap();
+        std::fs::write(gems.join("not-a-dir"), "").unwrap();
+
+        remove_other_gem_homes(&gems, &current);
+
+        assert!(current.join("bin").is_dir());
+        assert!(!stale.exists());
+        assert!(gems.join("not-a-dir").exists());
+        let _ = std::fs::remove_dir_all(&gems);
+    }
+
+    #[test]
+    fn update_checks_are_rate_limited_per_gem() {
+        let gem_home = temp_dir("marker");
+        let gemset = Gemset {
+            gem_home: gem_home.clone(),
+            shell_env: Vec::new(),
+        };
+
+        assert!(gemset.should_check_for_updates("haml-lsp"));
+        assert!(
+            !gemset.should_check_for_updates("haml-lsp"),
+            "second check within the interval is skipped"
+        );
+        assert!(
+            gemset.should_check_for_updates("ruby-lsp"),
+            "other gems have their own marker"
+        );
+        let _ = std::fs::remove_dir_all(&gem_home);
     }
 
     #[test]

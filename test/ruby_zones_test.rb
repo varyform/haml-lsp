@@ -56,7 +56,9 @@ class RubyZonesTest < Minitest::Test
       %li[post] text
          ^^^^^^
       %a(href=url title="x") text
-        ^^^^^^^^^^^^^^^^^^^^
+              ^^^^      ^^^
+      %a(href=)
+              ^
       %p= foo
          ^^^^^
     TEXT
@@ -70,6 +72,15 @@ class RubyZonesTest < Minitest::Test
       ^^^^^^^^^^^^^^^ ^^^^^^
         %p child
       \s
+    TEXT
+  end
+
+  def test_multiline_html_attributes
+    assert_zones <<~'TEXT'
+      %a(href=@url
+              ^^^^^
+             title='x')= text
+                   ^^^  ^^^^^^
     TEXT
   end
 

@@ -334,16 +334,14 @@ module HamlLsp
           end
         when "("
           scanner.getch
-          processed, closed, state = html_attributes(scanner.rest)
+          processed, closed, state = html_attributes(scanner.rest, index: index, col: col + 1)
           out << " " << processed
           if closed
             consumed = scanner.rest.bytesize - state[:remaining].bytesize
             body = scanner.rest.byteslice(0, consumed)
             scanner.pos += consumed
-            zone(index, col, col + units(body))
             col += 1 + units(body)
           else
-            zone(index, col)
             @continuation = { kind: :attr_html, state: state }
             return out
           end
@@ -394,10 +392,12 @@ module HamlLsp
     # Keys and `=` are blanked, values are kept as Ruby expressions separated
     # by `;` so they read as independent statements. Returns
     # [processed_text, closed?, state]. `state[:remaining]` is what follows
-    # the closing paren when closed.
-    def html_attributes(text, state = { after_value: false })
+    # the closing paren when closed. Only the values are recorded as Ruby
+    # zones; `index`/`col` locate `text` in the template.
+    def html_attributes(text, state = { after_value: false }, index: nil, col: 0)
       scanner = StringScanner.new(text)
       out = +""
+      unit_col = ->(byte_pos) { col + units(text.byteslice(0, byte_pos)) }
 
       until scanner.eos?
         if (ws = scanner.scan(/[ \t]+/))
@@ -425,14 +425,23 @@ module HamlLsp
           out << " "
           out << scanner.scan(/[ \t]*/).to_s
 
+          value_start = scanner.pos
           if (quote = scanner.scan(/["']/))
             body = quoted_string_body(scanner.rest, quote)
             out << quote << body
             scanner.pos += body.bytesize
             state[:after_value] = true
+            # Up to the closing quote (inclusive cursor before it); an
+            # unterminated string runs to the end of the line.
+            closing = body.end_with?(quote) ? scanner.pos - quote.bytesize : scanner.pos
+            zone(index, unit_col.call(value_start), unit_col.call(closing)) if index
           elsif (value = scanner.scan(HTML_ATTR_VALUE_RE))
             out << value
             state[:after_value] = true
+            zone(index, unit_col.call(value_start), unit_col.call(scanner.pos)) if index
+          elsif index
+            # `href=` with nothing typed yet: the cursor there wants Ruby completion.
+            zone(index, unit_col.call(value_start), unit_col.call(value_start))
           end
           next
         end
@@ -520,17 +529,15 @@ module HamlLsp
         @last_content = index
         true
       when :attr_html
-        processed, closed, state = html_attributes(line, @continuation[:state])
+        processed, closed, state = html_attributes(line, @continuation[:state], index: index, col: 0)
         if closed
           @continuation = nil
           consumed = line.bytesize - state[:remaining].bytesize
           head = line.byteslice(0, consumed)
           scanner = StringScanner.new(line)
           scanner.pos = consumed
-          zone(index, 0, units(head) - 1)
           @out[index] = processed + tag_attributes_and_rest(scanner, index, units(head))
         else
-          zone(index, 0)
           @out[index] = processed
         end
         @last_content = index

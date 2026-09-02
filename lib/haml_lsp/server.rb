@@ -45,15 +45,23 @@ module HamlLsp
     INTERNAL_ERROR = -32_603
     MESSAGE_TYPE_ERROR = 1
 
-    def initialize(input: $stdin, output: $stdout, error: $stderr, ruby_lsp_command: nil)
+    # Delay before pushing diagnostics to clients that cannot pull them, so a
+    # burst of keystrokes results in one parse instead of one per key.
+    PUSH_DIAGNOSTICS_DELAY = 0.3
+
+    def initialize(input: $stdin, output: $stdout, error: $stderr, ruby_lsp_command: nil,
+                   push_diagnostics_delay: PUSH_DIAGNOSTICS_DELAY)
       @client = Transport.new(input, output)
       @log_io = error
       @ruby_lsp_command = ruby_lsp_command
       @documents = {}
+      @documents_lock = Mutex.new
       @pending = {}
       @pending_lock = Mutex.new
       @encoding = PositionEncoding.new
       @supports_pull_diagnostics = false
+      @push_diagnostics_delay = push_diagnostics_delay
+      @push_timers = {}
       @server = nil
       @child = nil
       @exiting = false
@@ -99,6 +107,7 @@ module HamlLsp
       when "textDocument/didChange" then did_change(message)
       when "textDocument/didClose" then did_close(message)
       when "textDocument/diagnostic" then diagnostic(message)
+      when "textDocument/documentSymbol" then document_symbol(message)
       when "textDocument/completion" then completion(message)
       when "completionItem/resolve" then completion_item_resolve(message)
       when *RUBY_ONLY_REQUESTS then ruby_only_request(message)
@@ -153,12 +162,12 @@ module HamlLsp
         version: text_document[:version],
         encoding: @encoding,
       )
-      @documents[text_document[:uri]] = document
+      @documents_lock.synchronize { @documents[text_document[:uri]] = document }
 
       forward_to_server(message.merge(
         params: params.merge(textDocument: text_document.merge(languageId: RUBY_LANGUAGE_ID, text: document.ruby)),
       ))
-      publish_diagnostics(document) unless @supports_pull_diagnostics
+      schedule_push_diagnostics(document)
     end
 
     def did_change(message)
@@ -168,16 +177,29 @@ module HamlLsp
       return forward_to_server(message) unless document
 
       previous_ruby = document.ruby
-      document.apply_changes(params[:contentChanges] || [], version: text_document[:version])
+      change = @documents_lock.synchronize do
+        document.apply_changes(params[:contentChanges] || [], version: text_document[:version])
+        ShadowDiff.change(previous_ruby, document.ruby, @encoding)
+      end
 
-      change = ShadowDiff.change(previous_ruby, document.ruby, @encoding)
       forward_to_server(message.merge(params: params.merge(contentChanges: [change].compact)))
-      publish_diagnostics(document) unless @supports_pull_diagnostics
+      schedule_push_diagnostics(document)
     end
 
     def did_close(message)
-      @documents.delete(message.dig(:params, :textDocument, :uri))
+      uri = message.dig(:params, :textDocument, :uri)
+      @documents_lock.synchronize do
+        @documents.delete(uri)
+        @push_timers.delete(uri)&.kill
+      end
       forward_to_server(message)
+    end
+
+    def document_symbol(message)
+      document = @documents[message.dig(:params, :textDocument, :uri)]
+      return passthrough(message) unless document
+
+      respond(message[:id], DocumentSymbols.for(document))
     end
 
     def diagnostic(message)
@@ -222,12 +244,33 @@ module HamlLsp
       forward_to_server(message)
     end
 
+    # For clients without pull diagnostics: publish after a quiet period, and
+    # only if the document has not changed again in the meantime.
+    def schedule_push_diagnostics(document)
+      return if @supports_pull_diagnostics
+
+      version = document.version
+      @documents_lock.synchronize do
+        @push_timers.delete(document.uri)&.kill
+        @push_timers[document.uri] = Thread.new do
+          sleep(@push_diagnostics_delay)
+          @documents_lock.synchronize do
+            current = @documents[document.uri]
+            publish_diagnostics(current) if current.equal?(document) && current.version == version
+            @push_timers.delete(document.uri)
+          end
+        end
+      end
+    end
+
     def publish_diagnostics(document)
       @client.write(
         jsonrpc: "2.0",
         method: "textDocument/publishDiagnostics",
         params: { uri: document.uri, version: document.version, diagnostics: Diagnostics.for(document) },
       )
+    rescue Transport::ClosedError
+      nil
     end
 
     def haml_document?(text_document)
