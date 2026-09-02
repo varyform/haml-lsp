@@ -66,12 +66,6 @@ class DocumentTest < Minitest::Test
     assert_equal "%p\n%hr", doc.source
   end
 
-  def test_ruby_end_position_reflects_appended_ends
-    doc = document("- if a\n  = b")
-
-    assert_equal "  if a\n    b; end", doc.ruby
-    assert_equal({ line: 1, character: 10 }, doc.ruby_end_position)
-  end
 
   def test_ruby_is_regenerated_after_changes
     doc = document("= a\n")

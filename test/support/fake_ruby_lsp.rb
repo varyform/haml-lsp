@@ -41,6 +41,7 @@ while (message = transport.read)
         textDocumentSync: { change: 2, openClose: true },
         hoverProvider: true,
         definitionProvider: true,
+        completionProvider: { triggerCharacters: ["."], resolveProvider: true },
         documentFormattingProvider: true,
         documentRangeFormattingProvider: true,
         documentOnTypeFormattingProvider: { firstTriggerCharacter: "\n" },

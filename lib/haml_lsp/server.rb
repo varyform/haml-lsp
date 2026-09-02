@@ -34,6 +34,14 @@ module HamlLsp
       "textDocument/codeAction" => [],
     }.freeze
 
+    # Requests that only make sense inside embedded Ruby. Outside of it (in
+    # markup or plain text) ruby-lsp would either answer with noise or with
+    # nothing, so they are answered here without a round trip.
+    RUBY_ONLY_REQUESTS = %w[textDocument/hover textDocument/signatureHelp textDocument/definition].freeze
+
+    # Characters that start a HAML construct we offer completions for.
+    HAML_TRIGGER_CHARACTERS = %w[% : !].freeze
+
     INTERNAL_ERROR = -32_603
     MESSAGE_TYPE_ERROR = 1
 
@@ -91,6 +99,9 @@ module HamlLsp
       when "textDocument/didChange" then did_change(message)
       when "textDocument/didClose" then did_close(message)
       when "textDocument/diagnostic" then diagnostic(message)
+      when "textDocument/completion" then completion(message)
+      when "completionItem/resolve" then completion_item_resolve(message)
+      when *RUBY_ONLY_REQUESTS then ruby_only_request(message)
       when "exit"
         @exiting = true
         forward_to_server(message)
@@ -156,14 +167,11 @@ module HamlLsp
       document = @documents[text_document[:uri]]
       return forward_to_server(message) unless document
 
-      previous_end = document.ruby_end_position
+      previous_ruby = document.ruby
       document.apply_changes(params[:contentChanges] || [], version: text_document[:version])
 
-      replacement = {
-        range: { start: { line: 0, character: 0 }, end: previous_end },
-        text: document.ruby,
-      }
-      forward_to_server(message.merge(params: params.merge(contentChanges: [replacement])))
+      change = ShadowDiff.change(previous_ruby, document.ruby, @encoding)
+      forward_to_server(message.merge(params: params.merge(contentChanges: [change].compact)))
       publish_diagnostics(document) unless @supports_pull_diagnostics
     end
 
@@ -180,6 +188,38 @@ module HamlLsp
       end
 
       respond(message[:id], { kind: "full", items: Diagnostics.for(document) })
+    end
+
+    def completion(message)
+      document, position = document_and_position(message)
+      return passthrough(message) if document.nil? || document.ruby_at?(position[:line], position[:character])
+
+      respond(message[:id], HamlCompletion.items(document, position[:line], position[:character]))
+    end
+
+    def completion_item_resolve(message)
+      if message.dig(:params, :data, :hamlLsp)
+        respond(message[:id], message[:params])
+      else
+        passthrough(message)
+      end
+    end
+
+    def ruby_only_request(message)
+      document, position = document_and_position(message)
+      return passthrough(message) if document.nil? || document.ruby_at?(position[:line], position[:character])
+
+      respond(message[:id], nil)
+    end
+
+    def document_and_position(message)
+      params = message[:params] || {}
+      [@documents[params.dig(:textDocument, :uri)], params[:position] || {}]
+    end
+
+    def passthrough(message)
+      track_request(message)
+      forward_to_server(message)
     end
 
     def publish_diagnostics(document)
@@ -248,6 +288,9 @@ module HamlLsp
       capabilities[:codeActionProvider] = false
       capabilities.delete(:documentOnTypeFormattingProvider)
       capabilities[:diagnosticProvider] ||= { interFileDependencies: false, workspaceDiagnostics: false }
+
+      completion = capabilities[:completionProvider] ||= {}
+      completion[:triggerCharacters] = (Array(completion[:triggerCharacters]) | HAML_TRIGGER_CHARACTERS)
 
       result[:capabilities] = capabilities
       result[:serverInfo] = {

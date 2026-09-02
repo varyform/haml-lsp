@@ -28,6 +28,14 @@ module HamlLsp
     HTML_ATTR_VALUE_RE = /(?:@@?|\$)?\w+/
     INTERPOLATION_START = '#{'
 
+    # Ruby zones per line: ranges (in code units of the position encoding)
+    # where the template embeds Ruby, so the server can tell Ruby positions
+    # from markup ones. `nil` as the end means "to the end of the line".
+    attr_reader :zones
+
+    # The shadow produced by the last #extract call.
+    attr_reader :ruby
+
     def self.extract(source, encoding: PositionEncoding.new)
       new(source, encoding: encoding).extract
     end
@@ -35,9 +43,25 @@ module HamlLsp
     def initialize(source, encoding: PositionEncoding.new)
       @source = source
       @enc = encoding
+      @zones = Hash.new { |h, k| h[k] = [] }
+    end
+
+    # True when `character` (code units) on `line` is inside embedded Ruby.
+    # The end of a zone is inclusive so a cursor right after the last Ruby
+    # character still counts.
+    def ruby_at?(line, character)
+      return false unless @zones.key?(line)
+
+      @zones[line].any? { |start, stop| character >= start && (stop.nil? || character <= stop) }
     end
 
     def extract
+      @ruby = build
+    end
+
+    private
+
+    def build
       return "" if @source.empty?
 
       @lines = @source.split("\n", -1)
@@ -54,8 +78,6 @@ module HamlLsp
       blank_ruby_comments!
       assemble
     end
-
-    private
 
     # ------------------------------------------------------------------
     # Line dispatch
@@ -77,7 +99,7 @@ module HamlLsp
 
       if @region
         if indent > @region[:indent]
-          @out[index] = region_line(line)
+          @out[index] = region_line(line, index)
           @last_content = index
           return
         end
@@ -101,20 +123,22 @@ module HamlLsp
         blank(content)
       when /\A-/
         push_block(indent) unless continued
+        zone(index, indent + 1)
         " " + ruby_script(content[1..], index)
       when /\A!!!/
         blank(content)
       when /\A(==|!==|&==)/
         op = Regexp.last_match(1)
-        blank(op) + plain_text(content[op.length..])
+        blank(op) + plain_text(content[op.length..], index, indent + op.length)
       when /\A(=|!=|&=|~)/
         op = Regexp.last_match(1)
         push_block(indent)
+        zone(index, indent + op.length)
         blank(op) + ruby_script(content[op.length..], index)
       when /\A[!&]/
-        " " + plain_text(content[1..])
+        " " + plain_text(content[1..], index, indent + 1)
       when /\A%[-:\w]/, /\A\.[-:\w]/, /\A#(?!\{)/
-        tag(content, index)
+        tag(content, index, indent)
       when /\A:(\w*)/
         name = Regexp.last_match(1)
         @region = { kind: name == "ruby" ? :filter_ruby : :filter_plain, indent: indent }
@@ -122,20 +146,30 @@ module HamlLsp
       when %r{\A/\[}
         blank(content)
       when %r{\A/}
-        " " + plain_text(content[1..])
+        " " + plain_text(content[1..], index, indent + 1)
       when /\A\\/
-        " " + plain_text(content[1..])
+        " " + plain_text(content[1..], index, indent + 1)
       else
-        plain_text(content)
+        plain_text(content, index, indent)
       end
     end
 
-    def region_line(line)
+    def region_line(line, index)
       case @region[:kind]
-      when :filter_ruby then line
-      when :filter_plain then plain_text(line)
+      when :filter_ruby
+        zone(index, 0)
+        line
+      when :filter_plain then plain_text(line, index, 0)
       else blank(line)
       end
+    end
+
+    def zone(index, start, stop = nil)
+      @zones[index] << [start, stop]
+    end
+
+    def units(string)
+      @enc.length(string)
     end
 
     # ------------------------------------------------------------------
@@ -211,7 +245,8 @@ module HamlLsp
 
     # Plain text: everything is blanked except `#{...}` interpolations, whose
     # Ruby is kept and turned into a statement (`#{` -> spaces, `}` -> `;`).
-    def plain_text(text)
+    # `index`/`col` (line and starting code unit) are used to record zones.
+    def plain_text(text, index = nil, col = 0)
       out = +""
       pos = 0
 
@@ -224,12 +259,15 @@ module HamlLsp
 
         close = matching_brace(text, start + 2)
         out << blank(text[pos...start]) << "  "
+        ruby_start = col + units(text[0, start + 2])
 
         if close
           out << text[(start + 2)...close] << ";"
+          zone(index, ruby_start, col + units(text[0, close])) if index
           pos = close + 1
         else
           out << text[(start + 2)..]
+          zone(index, ruby_start) if index
           return out
         end
       end
@@ -259,45 +297,39 @@ module HamlLsp
     # Tags
     # ------------------------------------------------------------------
 
-    def tag(content, index)
+    def tag(content, index, col)
       scanner = StringScanner.new(content)
-      out = +""
-      out << blank(scanner.scan(TAG_HEAD_RE).to_s)
-      out << tag_attributes_and_rest(scanner, index)
-      out
+      head = scanner.scan(TAG_HEAD_RE).to_s
+      blank(head) + tag_attributes_and_rest(scanner, index, col + units(head))
     end
 
     # Attribute groups (`{}`, `()`, `[]` in any order), whitespace modifiers,
     # then either inline script or inline plain text. Also used to resume a tag
-    # whose attribute group spilled over to the next line.
-    def tag_attributes_and_rest(scanner, index)
+    # whose attribute group spilled over to the next line. `col` is the code
+    # unit column of the scanner position.
+    def tag_attributes_and_rest(scanner, index, col)
       out = +""
 
       loop do
         case scanner.peek(1)
-        when "{"
-          scanner.getch
-          out << "{"
-          close = matching_brace(scanner.rest, 0)
+        when "{", "["
+          open = scanner.getch
+          close_char = open == "{" ? "}" : "]"
+          out << open
+          close = matching_brace(scanner.rest, 0, open: open, close: close_char)
           if close
-            out << scanner.rest[0..close]
-            scanner.pos += scanner.rest[0..close].bytesize
+            body = scanner.rest[0..close]
+            out << body
+            scanner.pos += body.bytesize
+            # The zone ends at the closing delimiter itself, so a cursor just
+            # before it is inside and just after it is not.
+            zone(index, col, col + units(body))
+            col += 1 + units(body)
           else
             out << scanner.rest
-            @continuation = { kind: :attr_hash, depth: brace_depth(scanner.rest, 1) }
-            return out
-          end
-        when "["
-          scanner.getch
-          out << "["
-          close = matching_brace(scanner.rest, 0, open: "[", close: "]")
-          if close
-            out << scanner.rest[0..close]
-            scanner.pos += scanner.rest[0..close].bytesize
-          else
-            out << scanner.rest
-            @continuation = { kind: :attr_hash, depth: brace_depth(scanner.rest, 1, open: "[", close: "]"),
-                              open: "[", close: "]" }
+            zone(index, col)
+            @continuation = { kind: :attr_hash, depth: brace_depth(scanner.rest, 1, open: open, close: close_char),
+                              open: open, close: close_char }
             return out
           end
         when "("
@@ -305,8 +337,13 @@ module HamlLsp
           processed, closed, state = html_attributes(scanner.rest)
           out << " " << processed
           if closed
-            scanner.pos += scanner.rest.bytesize - state[:remaining].bytesize
+            consumed = scanner.rest.bytesize - state[:remaining].bytesize
+            body = scanner.rest.byteslice(0, consumed)
+            scanner.pos += consumed
+            zone(index, col, col + units(body))
+            col += 1 + units(body)
           else
+            zone(index, col)
             @continuation = { kind: :attr_html, state: state }
             return out
           end
@@ -315,25 +352,27 @@ module HamlLsp
         end
       end
 
-      out << blank(scanner.scan(%r{[<>]*/?}).to_s)
-      out << tag_inline_content(scanner.rest, index)
+      modifiers = scanner.scan(%r{[<>]*/?}).to_s
+      out << blank(modifiers)
+      out << tag_inline_content(scanner.rest, index, col + units(modifiers))
       out
     end
 
-    def tag_inline_content(rest, index)
+    def tag_inline_content(rest, index, col)
       case rest
       when /\A(==|!==|&==)/
         op = Regexp.last_match(1)
-        blank(op) + plain_text(rest[op.length..])
+        blank(op) + plain_text(rest[op.length..], index, col + op.length)
       when /\A(=|!=|&=|~)/
         op = Regexp.last_match(1)
+        zone(index, col + op.length)
         # `;` separates the attribute hash / object reference expression from
         # the inline script so the shadow stays two statements.
         (" " * (op.length - 1)) + ";" + ruby_script(rest[op.length..], index)
       when /\A\s*\z/
         blank(rest)
       else
-        text = plain_text(rest)
+        text = plain_text(rest, index, col)
         if pipe_multiline?(rest)
           @continuation = { kind: :plain_pipe }
           strip_pipe(text)
@@ -444,6 +483,7 @@ module HamlLsp
           @continuation = nil
           return false
         end
+        zone(index, 0)
         @out[index] = strip_pipe(line)
         @last_content = index
         true
@@ -452,25 +492,29 @@ module HamlLsp
           @continuation = nil
           return false
         end
-        @out[index] = strip_pipe(plain_text(line))
+        @out[index] = strip_pipe(plain_text(line, index, 0))
         @last_content = index
         true
       when :ruby_comma
         @continuation = nil unless comma_multiline?(line)
+        zone(index, 0)
         @out[index] = line
         @last_content = index
         true
       when :attr_hash
-        open = @continuation[:open] || "{"
-        close = @continuation[:close] || "}"
+        open = @continuation[:open]
+        close = @continuation[:close]
         close_at = matching_brace(line, 0, open: open, close: close, depth: @continuation[:depth])
         if close_at
           @continuation = nil
+          head = line[0..close_at]
           scanner = StringScanner.new(line)
-          scanner.pos = line[0..close_at].bytesize
-          @out[index] = line[0..close_at] + tag_attributes_and_rest(scanner, index)
+          scanner.pos = head.bytesize
+          zone(index, 0, units(head) - 1)
+          @out[index] = head + tag_attributes_and_rest(scanner, index, units(head))
         else
           @continuation[:depth] = brace_depth(line, @continuation[:depth], open: open, close: close)
+          zone(index, 0)
           @out[index] = line
         end
         @last_content = index
@@ -479,10 +523,14 @@ module HamlLsp
         processed, closed, state = html_attributes(line, @continuation[:state])
         if closed
           @continuation = nil
+          consumed = line.bytesize - state[:remaining].bytesize
+          head = line.byteslice(0, consumed)
           scanner = StringScanner.new(line)
-          scanner.pos = line.bytesize - state[:remaining].bytesize
-          @out[index] = processed + tag_attributes_and_rest(scanner, index)
+          scanner.pos = consumed
+          zone(index, 0, units(head) - 1)
+          @out[index] = processed + tag_attributes_and_rest(scanner, index, units(head))
         else
+          zone(index, 0)
           @out[index] = processed
         end
         @last_content = index

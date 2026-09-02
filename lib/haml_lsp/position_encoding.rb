@@ -68,15 +68,5 @@ module HamlLsp
       end
       index
     end
-
-    # LSP position of the end of `text`.
-    def end_position(text)
-      last_newline = text.rindex("\n")
-      if last_newline
-        { line: text.count("\n"), character: length(text[(last_newline + 1)..]) }
-      else
-        { line: 0, character: length(text) }
-      end
-    end
   end
 end

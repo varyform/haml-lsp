@@ -8,7 +8,8 @@
 //! 3. `haml-lsp` from the worktree's shell `PATH` (`gem install haml-lsp`).
 
 use zed_extension_api::{
-    self as zed, settings::LspSettings, Command, LanguageServerId, Result, Worktree,
+    self as zed, lsp::CompletionKind, lsp::SymbolKind, settings::LspSettings, CodeLabel,
+    CodeLabelSpan, Command, LanguageServerId, Result, Worktree,
 };
 
 const EXECUTABLE: &str = "haml-lsp";
@@ -100,6 +101,94 @@ impl zed::Extension for HamlLspExtension {
                 .ok()
                 .and_then(|settings| settings.initialization_options),
         )
+    }
+
+    /// Syntax-highlights completion entries by kind. Ruby items come from
+    /// ruby-lsp (same mapping the Ruby extension uses); HAML items are the tag,
+    /// filter and doctype completions haml-lsp adds itself.
+    fn label_for_completion(
+        &self,
+        _language_server_id: &LanguageServerId,
+        completion: zed::lsp::Completion,
+    ) -> Option<CodeLabel> {
+        let zed::lsp::Completion {
+            label,
+            kind,
+            detail,
+            label_details,
+            ..
+        } = completion;
+        let kind = kind?;
+
+        let scope = match (kind, detail.as_deref()) {
+            (CompletionKind::Keyword, Some("HTML tag")) => "tag",
+            (CompletionKind::Module, Some("HAML filter")) => "keyword",
+            (CompletionKind::Value, _) => "constant",
+            (CompletionKind::Class | CompletionKind::Module, _) => "type",
+            (CompletionKind::Constant, _) if label == "nil" => "constant.builtin",
+            (CompletionKind::Constant, _) if label.starts_with("__") && label.ends_with("__") => {
+                "constant.builtin"
+            }
+            (CompletionKind::Constant, _) => "constant",
+            (
+                CompletionKind::Method
+                | CompletionKind::Reference
+                | CompletionKind::Function
+                | CompletionKind::Constructor,
+                _,
+            ) => "function.method",
+            (CompletionKind::Keyword, _) => "keyword",
+            (CompletionKind::Field, _) if label.starts_with('@') => "variable.special",
+            (CompletionKind::Field, _) if label == "self" || label == "super" => "variable.special",
+            (CompletionKind::Variable, _) => "variable",
+            (CompletionKind::Property, _) => "property",
+            _ => return None,
+        };
+
+        let label_len = label.len();
+        let mut spans = vec![CodeLabelSpan::literal(label, Some(scope.to_string()))];
+
+        if let Some(label_details) = label_details {
+            if let Some(detail) = label_details.detail {
+                spans.push(CodeLabelSpan::literal(detail, None));
+            }
+            if let Some(description) = label_details.description {
+                spans.push(CodeLabelSpan::literal(" ", None));
+                spans.push(CodeLabelSpan::literal(description, None));
+            }
+        } else if let Some(detail) = detail {
+            spans.push(CodeLabelSpan::literal(" ", None));
+            spans.push(CodeLabelSpan::literal(detail, None));
+        }
+
+        Some(CodeLabel {
+            code: String::new(),
+            spans,
+            filter_range: (0..label_len).into(),
+        })
+    }
+
+    fn label_for_symbol(
+        &self,
+        _language_server_id: &LanguageServerId,
+        symbol: zed::lsp::Symbol,
+    ) -> Option<CodeLabel> {
+        let name = &symbol.name;
+
+        let (code, display_start) = match symbol.kind {
+            SymbolKind::Method => (format!("def {name}; end"), 4),
+            SymbolKind::Class | SymbolKind::Module => (format!("class {name}; end"), 6),
+            SymbolKind::Constant => (name.clone(), 0),
+            _ => return None,
+        };
+
+        Some(CodeLabel {
+            code,
+            spans: vec![CodeLabelSpan::code_range(
+                display_start..display_start + name.len(),
+            )],
+            filter_range: (0..name.len()).into(),
+        })
     }
 }
 

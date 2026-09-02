@@ -15,11 +15,22 @@ module HamlLsp
       @source = source.dup
       @version = version
       @encoding = encoding
-      @ruby = nil
+      @extractor = nil
     end
 
     def ruby
-      @ruby ||= RubyExtractor.extract(@source, encoding: @encoding)
+      extractor.ruby
+    end
+
+    # Whether the LSP position points into embedded Ruby (as opposed to HAML
+    # markup or plain text).
+    def ruby_at?(line, character)
+      extractor.ruby_at?(line, character)
+    end
+
+    # The template line at `line`, without its line terminator.
+    def line(line)
+      @source.split("\n", -1)[line].to_s.chomp("\r")
     end
 
     # Applies `textDocument/didChange` content changes (incremental or full).
@@ -36,17 +47,17 @@ module HamlLsp
       end
 
       @version = version
-      @ruby = nil
-    end
-
-    # LSP position of the end of the current shadow, used to build the
-    # whole-document replacement edit sent to ruby-lsp.
-    def ruby_end_position
-      @encoding.end_position(ruby)
+      @extractor = nil
     end
 
     def line_count
       @source.count("\n") + 1
+    end
+
+    private
+
+    def extractor
+      @extractor ||= RubyExtractor.new(@source, encoding: @encoding).tap(&:extract)
     end
   end
 end

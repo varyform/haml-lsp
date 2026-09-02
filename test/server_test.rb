@@ -128,6 +128,44 @@ class ServerTest < Minitest::Test
     assert_equal [], request!("textDocument/codeAction", textDocument: { uri: URI }, range: range(0, 0, 0, 1))[:result]
   end
 
+  def test_completion_trigger_characters_include_haml_sigils
+    capabilities = initialize![:result][:capabilities]
+    assert_equal %w[. % : !], capabilities[:completionProvider][:triggerCharacters]
+  end
+
+  def test_ruby_requests_in_markup_are_answered_locally
+    initialize!
+    open!("%p Hello \#{name}\n")
+
+    # In plain text: no round trip, empty answers.
+    assert_nil request!("textDocument/hover", textDocument: { uri: URI }, position: { line: 0, character: 4 })[:result]
+    assert_nil request!("textDocument/definition", textDocument: { uri: URI }, position: { line: 0, character: 4 })[:result]
+    assert_nil request!("textDocument/signatureHelp", textDocument: { uri: URI }, position: { line: 0, character: 4 })[:result]
+
+    # Inside the interpolation: forwarded to ruby-lsp (the fake answers hover with the shadow line).
+    hover = request!("textDocument/hover", textDocument: { uri: URI }, position: { line: 0, character: 12 })
+    assert_equal "           name;", hover[:result][:contents]
+  end
+
+  def test_completion_offers_haml_syntax_in_markup_and_ruby_otherwise
+    initialize!
+    open!("%di\n= foo.ba\n")
+
+    haml = request!("textDocument/completion", textDocument: { uri: URI }, position: { line: 0, character: 3 })
+    assert_includes haml[:result][:items].map { |i| i[:label] }, "div"
+
+    ruby = request!("textDocument/completion", textDocument: { uri: URI }, position: { line: 1, character: 8 })
+    assert_equal "textDocument/completion", ruby[:result][:echo]
+  end
+
+  def test_resolving_a_haml_completion_item_returns_it_unchanged
+    initialize!
+    item = { label: "div", kind: 14, data: { hamlLsp: true } }
+
+    assert_equal item, request!("completionItem/resolve", item)[:result]
+    assert_equal "completionItem/resolve", request!("completionItem/resolve", { label: "x" })[:result][:echo]
+  end
+
   def test_diagnostics_for_haml_come_from_the_haml_parser
     initialize!
     open!("%div\n  %p\n %span\n")

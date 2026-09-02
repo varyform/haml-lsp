@@ -49,11 +49,18 @@ shifts. haml-lsp then runs as a proxy in front of a ruby-lsp process:
 
 ```
 editor ──LSP──▶ haml-lsp ──LSP──▶ ruby-lsp
-                 │  .haml text kept here; shadow sent on as a Ruby document
-                 │  hover/definition/completion/... forwarded verbatim
+                 │  .haml text kept here; shadow sent on as a Ruby document,
+                 │    only the changed lines on each edit
+                 │  inside embedded Ruby: hover/definition/completion/...
+                 │    forwarded verbatim
+                 │  in markup: HAML completions (tags after `%`, filters after
+                 │    `:`, doctypes after `!!!`); Ruby requests answered empty
                  │  formatting/code actions/RuboCop answered locally (empty)
                  └─ HAML syntax diagnostics from Haml::Parser
 ```
+
+The extractor also records which columns of each line are Ruby, so the proxy
+knows whether a cursor is in code or in markup.
 
 Handled HAML constructs: `- silent` and `= != &= ~ output` scripts, inline tag
 scripts (`%p= foo`), attribute hashes `{}` (including multi-line), HTML-style
