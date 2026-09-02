@@ -6,6 +6,19 @@ and both the gem and the Zed extension follow the same version number.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-02
+
+### Fixed
+
+- Ruby diagnostics for end-of-input errors (for example `= @user.`) had a
+  zero-width range that editors could not underline. Such ranges now cover
+  the character before the line end.
+
+### Added
+
+- `bin/probe`: a scripted editor session against any haml-lsp command that
+  prints the negotiated capabilities and the diagnostics for a snippet.
+
 ## [0.3.0] - 2026-09-02
 
 ### Added
@@ -83,7 +96,8 @@ and both the gem and the Zed extension follow the same version number.
 - Zed extension attaching `haml-lsp` to the `Haml` language, resolving the
   server through `Gemfile.lock` (`bundle exec`) or `PATH`.
 
-[Unreleased]: https://github.com/olehsavchuk/haml-lsp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/olehsavchuk/haml-lsp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/olehsavchuk/haml-lsp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/olehsavchuk/haml-lsp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/olehsavchuk/haml-lsp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/olehsavchuk/haml-lsp/releases/tag/v0.1.0
