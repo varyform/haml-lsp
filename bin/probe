@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Talks to a running `haml-lsp` command the way an editor would and prints
+# what comes back for one HAML snippet. Useful to tell "server bug" from
+# "editor configuration" apart.
+#
+#   bin/probe [--command "bundle exec haml-lsp"] [--push] [FILE.haml]
+#
+# --push  pretend the editor cannot pull diagnostics (expect publishDiagnostics)
+
+require "json"
+require "open3"
+require "timeout"
+require "optparse"
+require_relative "../lib/haml_lsp/transport"
+
+command = "bundle exec haml-lsp"
+push = false
+OptionParser.new do |o|
+  o.on("--command CMD") { |c| command = c }
+  o.on("--push") { push = true }
+end.parse!(ARGV)
+
+haml = ARGV.first ? File.read(ARGV.first) : "%p\n  = @user.\n"
+uri = "file://#{Dir.pwd}/app/views/probe.html.haml"
+
+stdin, stdout, stderr, wait = Open3.popen3(command)
+Thread.new { stderr.each_line { |l| $stderr.print "  [stderr] #{l}" } }
+transport = HamlLsp::Transport.new(stdout, stdin)
+
+id = 0
+send = lambda do |method, params, request: true|
+  message = { jsonrpc: "2.0", method: method, params: params }
+  message[:id] = (id += 1) if request
+  transport.write(message)
+  message[:id]
+end
+
+text_document_caps = push ? {} : { diagnostic: {} }
+init_id = send.call("initialize", { processId: Process.pid, rootUri: "file://#{Dir.pwd}",
+                                    capabilities: { textDocument: text_document_caps } })
+
+Timeout.timeout(120) do
+  loop do
+    message = transport.read or abort("server closed the connection")
+    if message[:id] == init_id && message.key?(:result)
+      caps = message[:result][:capabilities]
+      puts "initialize: diagnosticProvider=#{caps[:diagnosticProvider].inspect} encoding=#{caps[:positionEncoding]}"
+      break
+    end
+    transport.write(jsonrpc: "2.0", id: message[:id], result: nil) if message[:id] && message[:method]
+  end
+end
+send.call("initialized", {}, request: false)
+send.call("textDocument/didOpen", { textDocument: { uri: uri, languageId: "haml", version: 1, text: haml } },
+          request: false)
+
+diag_id = send.call("textDocument/diagnostic", { textDocument: { uri: uri } }) unless push
+
+Timeout.timeout(30) do
+  loop do
+    message = transport.read or abort("server closed the connection")
+    if message[:method] == "textDocument/publishDiagnostics"
+      puts "publishDiagnostics: #{JSON.pretty_generate(message[:params][:diagnostics])}"
+      break
+    elsif diag_id && message[:id] == diag_id
+      puts "textDocument/diagnostic result: #{JSON.pretty_generate(message[:result] || message[:error])}"
+      break
+    elsif message[:id] && message[:method]
+      transport.write(jsonrpc: "2.0", id: message[:id], result: nil)
+    end
+  end
+end
+
+send.call("shutdown", nil)
+send.call("exit", nil, request: false)
+wait.join(5)

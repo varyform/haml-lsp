@@ -48,9 +48,13 @@ module HamlLsp
               limit
             end
           stop = [[stop, character + 1].max, limit].min
+          # Editors cannot draw a squiggle under an empty range; end-of-input
+          # errors sit exactly at the line end, so underline the character before.
+          character = [character - 1, 0].max if stop <= character
           { line: line, range: [character, [stop, character].max], message: error.message, anchored: false }
         elsif (anchor = anchor_line(document, line))
           start, stop = document.ruby_span(anchor)
+          start = [start - 1, 0].max if stop <= start
           { line: anchor, range: [start, stop], message: error.message, anchored: true }
         end
       end

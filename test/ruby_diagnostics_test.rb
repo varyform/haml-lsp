@@ -58,7 +58,9 @@ class RubyDiagnosticsTest < Minitest::Test
     diagnostic = diagnostics.first
     assert_equal "ruby", diagnostic[:source]
     assert_equal HamlLsp::RubyDiagnostics::SEVERITY_ERROR, diagnostic[:severity]
-    assert_equal({ start: { line: 0, character: 10 }, end: { line: 0, character: 10 } }, diagnostic[:range])
+    # The error is at end of input (column 10); the range is widened to the `.`
+    # so editors have something to underline.
+    assert_equal({ start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, diagnostic[:range])
     assert_match(/expecting a message/, diagnostic[:message])
   end
 
@@ -95,6 +97,15 @@ class RubyDiagnosticsTest < Minitest::Test
     assert_equal 8, diagnostics.first[:range][:start][:character]
   end
 
+  def test_ranges_are_never_empty
+    ["%p= @user.\n", "= foo(\n", "- x = [1, 2\n%p\n", "= \"unterminated\n", "%p= \n", "- if\n  %p\n", "= \n  %p\n"].each do |haml|
+      HamlLsp::RubyDiagnostics.for(document(haml)).each do |d|
+        assert d[:range][:end][:character] > d[:range][:start][:character] || d[:range][:end][:line] > d[:range][:start][:line],
+               "empty range for #{haml.inspect}: #{d.inspect}"
+      end
+    end
+  end
+
   def test_errors_are_capped
     haml = Array.new(30) { |i| "= foo(#{i},, 2)" }.join("\n") + "\n"
     assert_equal HamlLsp::RubyDiagnostics::MAX_DIAGNOSTICS, HamlLsp::RubyDiagnostics.for(document(haml)).size
@@ -106,7 +117,7 @@ class RubyDiagnosticsTest < Minitest::Test
 
     assert_equal 1, diagnostics.size
     # "%p 🎉 #{" is 3 + 2 + 1 + 2 = 8 units; "user." ends at 13.
-    assert_equal 13, diagnostics.first[:range][:start][:character]
+    assert_equal({ start: { line: 0, character: 13 }, end: { line: 0, character: 14 } }, diagnostics.first[:range])
   end
 
   def test_combined_diagnostics_prefer_haml_errors
