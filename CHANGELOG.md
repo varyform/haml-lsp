@@ -6,6 +6,32 @@ and both the gem and the Zed extension follow the same version number.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
+### Added
+
+- Ruby syntax errors inside templates are reported as diagnostics (source
+  `ruby`): the shadow is parsed with Prism and errors are mapped back onto
+  the template. Errors Prism places on blank lines or at end of input are
+  attached to the nearest preceding line with Ruby, one diagnostic per line,
+  capped at ten. HAML syntax errors take precedence.
+- `textDocument/documentSymbol` answers with an outline of tags and filters
+  nested by indentation, for editors that build their outline from LSP
+  symbols (Zed uses tree-sitter for its outline and is unaffected).
+- GitHub Actions CI: minitest suite and gem build on Ruby 3.3/3.4, the
+  end-to-end smoke test against ruby-lsp, and fmt/clippy/test/wasm build for
+  the Zed extension.
+
+### Changed
+
+- Only the values of HTML-style `(...)` attributes count as Ruby zones; keys
+  and parentheses no longer trigger Ruby requests.
+- Clients without pull diagnostics receive one `publishDiagnostics` after a
+  300 ms quiet period instead of one per keystroke.
+- Zed extension: gem directories left over from other Ruby versions are
+  removed, and the `gem outdated` network check runs at most once a day per
+  gem.
+
 ## [0.2.0] - 2026-09-02
 
 ### Added
@@ -57,6 +83,7 @@ and both the gem and the Zed extension follow the same version number.
 - Zed extension attaching `haml-lsp` to the `Haml` language, resolving the
   server through `Gemfile.lock` (`bundle exec`) or `PATH`.
 
-[Unreleased]: https://github.com/olehsavchuk/haml-lsp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/olehsavchuk/haml-lsp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/olehsavchuk/haml-lsp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/olehsavchuk/haml-lsp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/olehsavchuk/haml-lsp/releases/tag/v0.1.0

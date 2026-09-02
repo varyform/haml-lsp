@@ -3,7 +3,8 @@
 A language server for [HAML](https://haml.info) templates that brings
 [ruby-lsp](https://github.com/Shopify/ruby-lsp)'s Ruby intelligence into your
 views: hover, go-to-definition, completion, signature help, document
-highlights, inlay hints and more — plus HAML syntax diagnostics.
+highlights, inlay hints and more — plus HAML and embedded-Ruby syntax
+diagnostics.
 
 ```haml
 %section.profile{ class: css_class }
@@ -56,7 +57,8 @@ editor ──LSP──▶ haml-lsp ──LSP──▶ ruby-lsp
                  │  in markup: HAML completions (tags after `%`, filters after
                  │    `:`, doctypes after `!!!`); Ruby requests answered empty
                  │  formatting/code actions/RuboCop answered locally (empty)
-                 └─ HAML syntax diagnostics from Haml::Parser
+                 │  HAML syntax diagnostics from Haml::Parser
+                 └─ Ruby syntax diagnostics from Prism, mapped back to the template
 ```
 
 The extractor also records which columns of each line are Ruby, so the proxy
