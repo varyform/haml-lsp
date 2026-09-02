@@ -1,0 +1,41 @@
+!!! 5
+-# Renders a user profile page.
+%html
+  %head
+    %title= page_title(@user)
+    = stylesheet_link_tag "application"
+  %body.profile{ class: body_class, data: { user_id: @user.id } }
+    / Header
+    %h1#name= @user.full_name
+    - email = @user.email
+    %p.email(href=email title="Mail #{@user.name}" disabled)
+      Contact: #{mail_to(@user.email)} or #{phone_link(@user)}
+    - if current_user.admin?
+      = link_to "Edit", edit_user_path(@user), class: "btn"
+    - elsif current_user == @user
+      = link_to "Settings", settings_path
+    - else
+      %p No actions available
+    - case @user.role
+    - when :owner
+      %span.badge Owner
+    - when :member
+      %span.badge Member
+    %ul
+      - @user.posts.each do |post|
+        %li[post]
+          = render partial: "posts/summary",
+            locals: { post: post, compact: true }
+          = link_to post.title, |
+              post_path(post) |
+    :ruby
+      total = @user.posts.count
+      label = total == 1 ? "post" : "posts"
+    :javascript
+      console.log("#{total} #{label}");
+    %footer
+      = form_for @user do |f|
+        = f.text_field :name
+        = f.submit
+      \= not ruby
+      %p== Hello #{@user.first_name}

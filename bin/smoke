@@ -1,0 +1,201 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# End-to-end smoke test against a *real* ruby-lsp.
+#
+# Creates a throwaway Ruby project with a class and a HAML view that uses it,
+# starts haml-lsp (which starts ruby-lsp), waits for indexing, then asks for
+# hover, definition and completion at positions inside the HAML file and
+# prints the results. Exit status is non-zero if any of them came back empty.
+#
+#   bin/smoke                 # uses `ruby-lsp` from PATH
+#   bin/smoke --keep          # leave the temp project around for poking at
+
+require "tmpdir"
+require "fileutils"
+require "json"
+require "timeout"
+require_relative "../lib/haml_lsp"
+
+keep = ARGV.delete("--keep")
+root = Dir.mktmpdir("haml-lsp-smoke")
+at_exit { FileUtils.rm_rf(root) unless keep }
+
+FileUtils.mkdir_p(File.join(root, "app/models"))
+FileUtils.mkdir_p(File.join(root, "app/views/users"))
+File.write(File.join(root, "app/models/user.rb"), <<~RUBY)
+  # A person who can sign in.
+  class User
+    # The user's display name, e.g. "Ada Lovelace".
+    def full_name
+      "\#{first_name} \#{last_name}"
+    end
+
+    def first_name = "Ada"
+    def last_name = "Lovelace"
+  end
+
+  module UserHelper
+    # Renders a greeting for the given user.
+    def greeting_for(user, punctuation: "!")
+      "Hello, \#{user.full_name}\#{punctuation}"
+    end
+  end
+RUBY
+
+haml = <<~HAML
+  %section.profile{ class: css_class }
+    %h1= @user.full_name
+    - if @user.first_name == "Ada"
+      %p= greeting_for(@user, punctuation: "?")
+    - user = User.new
+    = user.la
+HAML
+haml_path = File.join(root, "app/views/users/show.html.haml")
+File.write(haml_path, haml)
+uri = "file://#{haml_path}"
+
+puts "project: #{root}"
+
+client_r, server_w = IO.pipe
+server_r, client_w = IO.pipe
+server = HamlLsp::Server.new(input: server_r, output: server_w, error: $stderr)
+Dir.chdir(root)
+server_thread = Thread.new { server.run }
+client = HamlLsp::Transport.new(client_r, client_w)
+
+id = 0
+pending = {}
+notifications = Queue.new
+
+reader = Thread.new do
+  while (message = client.read)
+    if message[:method]
+      notifications << message
+      # Answer requests ruby-lsp makes of the "editor".
+      client.write(jsonrpc: "2.0", id: message[:id], result: nil) if message.key?(:id)
+    else
+      pending.delete(message[:id])&.push(message)
+    end
+  end
+end
+
+def request(client, pending, id, method, params)
+  queue = Queue.new
+  pending[id] = queue
+  client.write(jsonrpc: "2.0", id: id, method: method, params: params)
+  Timeout.timeout(60) { queue.pop }
+end
+
+init = request(client, pending, id += 1, "initialize", {
+  processId: Process.pid,
+  rootUri: "file://#{root}",
+  workspaceFolders: [{ uri: "file://#{root}", name: "smoke" }],
+  capabilities: {
+    general: { positionEncodings: ["utf-16"] },
+    textDocument: { diagnostic: {}, hover: { contentFormat: ["markdown"] } },
+    window: { workDoneProgress: true },
+  },
+  initializationOptions: { enabledFeatures: { onTypeFormatting: false } },
+})
+puts "server: #{init[:result][:serverInfo]}"
+puts "encoding: #{init[:result][:capabilities][:positionEncoding]}"
+client.write(jsonrpc: "2.0", method: "initialized", params: {})
+
+# Wait for ruby-lsp's indexing progress to finish.
+print "indexing"
+Timeout.timeout(120) do
+  loop do
+    message = notifications.pop
+    print "."
+    break if message[:method] == "$/progress" && message.dig(:params, :value, :kind) == "end"
+  end
+end
+puts
+
+client.write(
+  jsonrpc: "2.0",
+  method: "textDocument/didOpen",
+  params: { textDocument: { uri: uri, languageId: "haml", version: 1, text: haml } },
+)
+
+failures = []
+
+def section(title)
+  puts
+  puts "== #{title}"
+end
+
+section "hover over `full_name` (line 1)"
+hover = request(client, pending, id += 1, "textDocument/hover",
+                textDocument: { uri: uri }, position: { line: 1, character: 16 })
+contents = hover.dig(:result, :contents, :value) || hover.dig(:result, :contents)
+puts contents.to_s.lines.first(6).join
+failures << "hover" unless contents.to_s.include?("full_name")
+
+def locations(result)
+  list = result.is_a?(Hash) ? [result] : Array(result)
+  list.map { |l| "#{l[:uri] || l[:targetUri]}:#{l.dig(:range, :start, :line) || l.dig(:targetRange, :start, :line)}" }
+end
+
+section "definition of `full_name` (line 1)"
+definition = request(client, pending, id += 1, "textDocument/definition",
+                     textDocument: { uri: uri }, position: { line: 1, character: 16 })
+found = locations(definition[:result])
+puts found
+failures << "definition full_name" unless found.any? { |l| l.include?("user.rb") }
+
+section "definition of `User` (line 4)"
+definition = request(client, pending, id += 1, "textDocument/definition",
+                     textDocument: { uri: uri }, position: { line: 4, character: 13 })
+found = locations(definition[:result])
+puts found
+failures << "definition User" unless found.any? { |l| l.include?("user.rb") }
+
+# Receiver-less calls to module methods are resolved by ruby-lsp only when it
+# can guess the receiver; inside a template there is nothing to guess from, so
+# this is informational (ERB behaves the same way).
+section "definition of receiver-less `greeting_for` (line 3, informational)"
+definition = request(client, pending, id += 1, "textDocument/definition",
+                     textDocument: { uri: uri }, position: { line: 3, character: 10 })
+found = locations(definition[:result])
+puts(found.empty? ? "(none)" : found)
+
+section "completion after `user.la` (line 5)"
+completion = request(client, pending, id += 1, "textDocument/completion",
+                     textDocument: { uri: uri }, position: { line: 5, character: 9 })
+items = completion[:result].is_a?(Hash) ? completion[:result][:items] : Array(completion[:result])
+labels = items.map { |i| i[:label] }
+puts labels.first(10).inspect
+failures << "completion" unless labels.include?("last_name")
+
+section "HAML diagnostics on a broken edit"
+client.write(
+  jsonrpc: "2.0",
+  method: "textDocument/didChange",
+  params: {
+    textDocument: { uri: uri, version: 2 },
+    contentChanges: [{ range: { start: { line: 5, character: 0 }, end: { line: 5, character: 0 } }, text: " " }],
+  },
+)
+diag = request(client, pending, id += 1, "textDocument/diagnostic", textDocument: { uri: uri })
+diag.dig(:result, :items).to_a.each { |d| puts "line #{d[:range][:start][:line]}: #{d[:message]}" }
+failures << "diagnostics" if diag.dig(:result, :items).to_a.empty?
+
+section "formatting is refused for HAML"
+fmt = request(client, pending, id += 1, "textDocument/formatting", textDocument: { uri: uri }, options: {})
+puts fmt[:result].inspect
+failures << "formatting" unless fmt[:result].nil?
+
+request(client, pending, id += 1, "shutdown", nil)
+client.write(jsonrpc: "2.0", method: "exit")
+server_thread.join(10)
+reader.kill
+
+puts
+if failures.empty?
+  puts "OK"
+else
+  puts "FAILED: #{failures.join(", ")}"
+  exit 1
+end

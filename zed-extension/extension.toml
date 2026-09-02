@@ -1,0 +1,13 @@
+id = "haml-lsp"
+name = "HAML Language Server"
+version = "0.1.0"
+schema_version = 1
+authors = ["Oleh"]
+description = "Ruby intelligence (hover, go-to-definition, completion, diagnostics) inside HAML templates via haml-lsp"
+repository = "https://github.com/olehsavchuk/haml-lsp"
+
+# The `Haml` language itself (grammar, highlighting) is provided by the
+# separate `haml` extension; this one only attaches a language server to it.
+[language_servers.haml-lsp]
+name = "haml-lsp"
+languages = ["Haml"]
