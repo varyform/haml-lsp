@@ -23,6 +23,8 @@ const EXECUTABLE: &str = "haml-lsp";
 const GEM_NAME: &str = "haml-lsp";
 const RUBY_LSP: &str = "ruby-lsp";
 
+type Env = Vec<(String, String)>;
+
 struct HamlLspExtension;
 
 impl HamlLspExtension {
@@ -46,9 +48,9 @@ impl HamlLspExtension {
     fn ruby_lsp_fallback(
         language_server_id: &LanguageServerId,
         worktree: &Worktree,
-        env: Vec<(String, String)>,
+        env: Env,
         auto_install: bool,
-    ) -> Result<(Vec<String>, Vec<(String, String)>)> {
+    ) -> Result<(Vec<String>, Env)> {
         let has_ruby_lsp =
             worktree.which(RUBY_LSP).is_some() || Self::gemfile_lock_has_gem(worktree, RUBY_LSP);
         if has_ruby_lsp || !auto_install {

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gem:
+    name: Ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.3", "3.4"]
+        include:
+          - ruby: head
+            experimental: true
+    continue-on-error: ${{ matrix.experimental || false }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - run: bundle exec rake test
+      - name: Smoke test against a real ruby-lsp
+        # Exercises the proxy end to end (spawning ruby-lsp, indexing, hover,
+        # definition, completion, diagnostics). ruby-lsp comes from the
+        # development group of the Gemfile.
+        run: bundle exec ruby bin/smoke
+        timeout-minutes: 10
+      - run: gem build haml-lsp.gemspec
+
+  zed-extension:
+    name: Zed extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zed-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: zed-extension
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release --target wasm32-wasip2

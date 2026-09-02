@@ -57,9 +57,13 @@ uri = "file://#{haml_path}"
 
 puts "project: #{root}"
 
+# Under `bundle exec` (CI), ruby-lsp lives in this project's bundle rather
+# than on PATH; BUNDLE_GEMFILE is inherited so the child finds it too.
+ruby_lsp_command = ENV["HAML_LSP_RUBY_LSP_COMMAND"] || (ENV["BUNDLE_GEMFILE"] ? %w[bundle exec ruby-lsp] : nil)
+
 client_r, server_w = IO.pipe
 server_r, client_w = IO.pipe
-server = HamlLsp::Server.new(input: server_r, output: server_w, error: $stderr)
+server = HamlLsp::Server.new(input: server_r, output: server_w, error: $stderr, ruby_lsp_command: ruby_lsp_command)
 Dir.chdir(root)
 server_thread = Thread.new { server.run }
 client = HamlLsp::Transport.new(client_r, client_w)
