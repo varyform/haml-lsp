@@ -42,6 +42,8 @@ while (message = transport.read)
         hoverProvider: true,
         definitionProvider: true,
         completionProvider: { triggerCharacters: ["."], resolveProvider: true },
+        semanticTokensProvider: { legend: { tokenTypes: [], tokenModifiers: [] }, range: true, full: { delta: true } },
+        foldingRangeProvider: true,
         documentFormattingProvider: true,
         documentRangeFormattingProvider: true,
         documentOnTypeFormattingProvider: { firstTriggerCharacter: "\n" },
@@ -75,6 +77,12 @@ while (message = transport.read)
     respond(transport, id, { contents: line })
   when "fake/documents"
     respond(transport, id, documents)
+  when "textDocument/foldingRange"
+    # Fold every line of the stored (shadow) text to its full length, like a fold ending on an appended `end`.
+    doc = documents[params[:textDocument][:uri]]
+    lines = doc[:text].split("\n", -1)
+    respond(transport, id, [{ startLine: 0, startCharacter: 0, endLine: lines.size - 2,
+                              endCharacter: encoding.length(lines[-2].to_s), kind: "region" }])
   when "textDocument/diagnostic"
     respond(transport, id, { kind: "full", items: [{ message: "from ruby-lsp" }] })
   when "shutdown"

@@ -133,6 +133,21 @@ class ServerTest < Minitest::Test
     assert_equal %w[. % : !], capabilities[:completionProvider][:triggerCharacters]
   end
 
+  def test_semantic_token_deltas_are_disabled
+    capabilities = initialize![:result][:capabilities]
+    assert_equal true, capabilities[:semanticTokensProvider][:full]
+    assert_equal true, capabilities[:semanticTokensProvider][:range]
+  end
+
+  def test_response_positions_are_clamped_to_the_template
+    initialize!
+    open!("- if a\n  = b\n")
+
+    # The fake folds to the end of the shadow line `    b; end` (10); the template line `  = b` is 5 long.
+    folds = request!("textDocument/foldingRange", textDocument: { uri: URI })[:result]
+    assert_equal [{ startLine: 0, startCharacter: 0, endLine: 1, endCharacter: 5, kind: "region" }], folds
+  end
+
   def test_ruby_requests_in_markup_are_answered_locally
     initialize!
     open!("%p Hello \#{name}\n")

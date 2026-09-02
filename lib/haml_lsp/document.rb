@@ -15,7 +15,7 @@ module HamlLsp
       @source = source.dup
       @version = version
       @encoding = encoding
-      @extractor = nil
+      reset_caches
     end
 
     def ruby
@@ -30,7 +30,13 @@ module HamlLsp
 
     # The template line at `line`, without its line terminator.
     def line(line)
-      @source.split("\n", -1)[line].to_s.chomp("\r")
+      lines[line].to_s.chomp("\r")
+    end
+
+    # Length of the template line in code units of the position encoding
+    # (0 for lines past the end of the document).
+    def line_length(line)
+      @line_lengths[line] ||= @encoding.length(line(line))
     end
 
     # Applies `textDocument/didChange` content changes (incremental or full).
@@ -47,7 +53,7 @@ module HamlLsp
       end
 
       @version = version
-      @extractor = nil
+      reset_caches
     end
 
     def line_count
@@ -58,6 +64,16 @@ module HamlLsp
 
     def extractor
       @extractor ||= RubyExtractor.new(@source, encoding: @encoding).tap(&:extract)
+    end
+
+    def lines
+      @lines ||= @source.split("\n", -1)
+    end
+
+    def reset_caches
+      @extractor = nil
+      @lines = nil
+      @line_lengths = {}
     end
   end
 end

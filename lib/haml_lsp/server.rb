@@ -272,8 +272,19 @@ module HamlLsp
     def post_process_response(message, pending)
       case pending[:method]
       when "initialize" then patch_initialize_result(message)
-      else message
+      else clamp_positions(message, pending)
       end
+    end
+
+    # Responses may reference the `; end` text appended to shadow lines; pull
+    # those positions back inside the template.
+    def clamp_positions(message, pending)
+      return message unless message.key?(:result) && !@documents.empty?
+
+      message.merge(result: ResponseClamper.new(@documents, pending[:uri]).clamp(message[:result]))
+    rescue StandardError => e
+      log("failed to clamp response for #{pending[:method]}: #{e.full_message}")
+      message
     end
 
     def patch_initialize_result(message)
@@ -291,6 +302,11 @@ module HamlLsp
 
       completion = capabilities[:completionProvider] ||= {}
       completion[:triggerCharacters] = (Array(completion[:triggerCharacters]) | HAML_TRIGGER_CHARACTERS)
+
+      # Delta-encoded semantic token *edits* cannot be clamped to the template,
+      # so only offer full requests.
+      semantic = capabilities[:semanticTokensProvider]
+      semantic[:full] = true if semantic.is_a?(Hash) && semantic[:full].is_a?(Hash)
 
       result[:capabilities] = capabilities
       result[:serverInfo] = {
