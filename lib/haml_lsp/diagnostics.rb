@@ -7,9 +7,11 @@ rescue LoadError
 end
 
 module HamlLsp
-  # HAML syntax diagnostics, produced by running the real HAML parser over the
-  # template. ruby-lsp's own diagnostics (RuboCop, Ruby syntax errors) are
-  # intercepted by the proxy because they would be meaningless on the shadow.
+  # Diagnostics for a HAML document: HAML syntax errors from the real HAML
+  # parser, and -- when the HAML itself is well formed -- Ruby syntax errors in
+  # the embedded code (see RubyDiagnostics). ruby-lsp's own diagnostics
+  # (RuboCop, Ruby syntax errors) are intercepted by the proxy because they
+  # would lint the shadow's placeholders.
   module Diagnostics
     SEVERITY_ERROR = 1
     SOURCE = "haml"
@@ -19,15 +21,24 @@ module HamlLsp
     end
 
     def self.for(document)
+      haml = haml_errors(document)
+      # The shadow of a template with broken indentation is meaningless; report
+      # the HAML problem alone.
+      return haml unless haml.empty?
+
+      RubyDiagnostics.for(document)
+    rescue StandardError
+      # A parser blowing up on half-typed input must never take the server down.
+      []
+    end
+
+    def self.haml_errors(document)
       return [] unless available?
 
       ::Haml::Parser.new({}).call(document.source)
       []
     rescue ::Haml::SyntaxError => e
       [syntax_error(document, e)]
-    rescue StandardError
-      # The parser blowing up on half-typed input must never take the server down.
-      []
     end
 
     def self.syntax_error(document, error)

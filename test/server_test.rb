@@ -195,6 +195,12 @@ class ServerTest < Minitest::Test
     change!(2, [{ range: range(2, 0, 2, 1), text: "  " }])
     result = request!("textDocument/diagnostic", textDocument: { uri: URI })[:result]
     assert_empty result[:items]
+
+    # Ruby errors inside the template are reported once the HAML is well formed.
+    change!(3, [{ range: range(1, 4, 1, 4), text: "= @user." }])
+    result = request!("textDocument/diagnostic", textDocument: { uri: URI })[:result]
+    assert_equal ["ruby"], result[:items].map { |d| d[:source] }
+    assert_equal 1, result[:items].first[:range][:start][:line]
   end
 
   def test_diagnostics_for_other_documents_are_forwarded

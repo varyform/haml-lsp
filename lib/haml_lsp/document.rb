@@ -28,6 +28,17 @@ module HamlLsp
       extractor.ruby_at?(line, character)
     end
 
+    # The span of embedded Ruby on `line` as [start, stop] code units (the
+    # union of its zones), or nil when the line has none.
+    def ruby_span(line)
+      zones = extractor.zones[line]
+      return nil if zones.nil? || zones.empty?
+
+      start = zones.map(&:first).min
+      stop = zones.map { |_, s| s || line_length(line) }.max
+      [start, [stop, line_length(line)].min]
+    end
+
     # The template line at `line`, without its line terminator.
     def line(line)
       lines[line].to_s.chomp("\r")
