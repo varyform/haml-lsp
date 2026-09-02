@@ -33,6 +33,45 @@ fn lockfile_lists_gem(lockfile: &str, gem: &str) -> bool {
     lockfile.lines().any(|line| line.starts_with(&prefix))
 }
 
+/// The most common cause of "not found" is a version manager: the gem was
+/// installed into one Ruby while Zed's login shell resolves another. Spell
+/// out what was searched so the fix is obvious.
+fn not_found_message(worktree: &Worktree, env: &[(String, String)]) -> String {
+    let ruby = worktree
+        .which("ruby")
+        .unwrap_or_else(|| "not found".to_string());
+    let gem = worktree
+        .which("gem")
+        .unwrap_or_else(|| "not found".to_string());
+    let ruby_lsp = worktree
+        .which("ruby-lsp")
+        .unwrap_or_else(|| "not found".to_string());
+    let path = env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("(empty)");
+
+    format_not_found(&ruby, &gem, &ruby_lsp, path)
+}
+
+fn format_not_found(ruby: &str, gem: &str, ruby_lsp: &str, path: &str) -> String {
+    format!(
+        "`{EXECUTABLE}` was not found.\n\n\
+         Zed searched the PATH of your login shell, which resolves to:\n\
+         \x20 ruby:     {ruby}\n\
+         \x20 gem:      {gem}\n\
+         \x20 ruby-lsp: {ruby_lsp}\n\n\
+         Fix one of:\n\
+         \x20 - run `gem install {GEM_NAME}` with *that* ruby (if you use mise/rbenv/asdf, make sure the \
+         global/default Ruby matches the one in your shell)\n\
+         \x20 - add `gem \"{GEM_NAME}\"` to your Gemfile and `bundle install`\n\
+         \x20 - set `lsp.{EXECUTABLE}.binary.path` in Zed settings\n\n\
+         haml-lsp also needs `ruby-lsp` (from PATH or your Gemfile).\n\
+         PATH: {path}"
+    )
+}
+
 impl zed::Extension for HamlLspExtension {
     fn new() -> Self {
         Self
@@ -84,11 +123,7 @@ impl zed::Extension for HamlLspExtension {
             });
         }
 
-        Err(format!(
-            "{EXECUTABLE} was not found. Install it with `gem install {GEM_NAME}`, add `gem \"{GEM_NAME}\"` \
-             to your Gemfile, or set `lsp.{EXECUTABLE}.binary.path` in Zed settings. \
-             haml-lsp also needs `ruby-lsp` to be installed."
-        ))
+        Err(not_found_message(worktree, &env))
     }
 
     fn language_server_initialization_options(
@@ -196,7 +231,7 @@ zed::register_extension!(HamlLspExtension);
 
 #[cfg(test)]
 mod tests {
-    use super::lockfile_lists_gem;
+    use super::{format_not_found, lockfile_lists_gem};
 
     const LOCKFILE: &str = "GEM\n  remote: https://rubygems.org/\n  specs:\n    haml (6.3.0)\n    haml-lsp (0.1.0)\n      haml (>= 6.0)\n    ruby-lsp (0.26.0)\n\nDEPENDENCIES\n  haml-lsp\n";
 
@@ -213,5 +248,22 @@ mod tests {
             "DEPENDENCIES\n  haml-lsp\n",
             "haml-lsp"
         ));
+    }
+
+    #[test]
+    fn not_found_message_names_the_searched_ruby() {
+        let message = format_not_found(
+            "/opt/rubies/4.0.6/bin/ruby",
+            "/opt/rubies/4.0.6/bin/gem",
+            "not found",
+            "/opt/rubies/4.0.6/bin:/usr/bin",
+        );
+
+        assert!(message.contains("`haml-lsp` was not found"));
+        assert!(message.contains("ruby:     /opt/rubies/4.0.6/bin/ruby"));
+        assert!(message.contains("ruby-lsp: not found"));
+        assert!(message.contains("gem install haml-lsp"));
+        assert!(message.contains("lsp.haml-lsp.binary.path"));
+        assert!(message.ends_with("PATH: /opt/rubies/4.0.6/bin:/usr/bin"));
     }
 }
